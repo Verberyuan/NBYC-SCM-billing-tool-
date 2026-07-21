@@ -1,0 +1,4 @@
+pandas>=2.0
+openpyxl>=3.1
+python-dateutil>=2.8
+pyinstaller>=6.0
