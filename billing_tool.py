@@ -10,7 +10,9 @@
 """
 
 import os
+import queue
 import sys
+import threading
 import traceback
 from datetime import date
 from typing import Optional
@@ -42,10 +44,24 @@ class BillingToolApp:
         self.other_mode_var = tk.StringVar(value="自动识别（推荐）")
         self.status_var = tk.StringVar(value="请选择需要处理的账单Excel文件")
 
+        # 运行模式：full=清洗+正式处理；clean=仅清洗；formal=仅正式处理
+        self.run_mode_var = tk.StringVar(value="full")
+        # 自动删除“仅有表头”的空sheet
+        self.remove_empty_var = tk.BooleanVar(value=True)
+        # 完整流程下，是否额外留档一份清洗后的文件
+        self.save_cleaned_var = tk.BooleanVar(value=False)
+
         self._output_path_auto = True  # 输出路径是否仍由程序自动推导（未被用户手动改过）
         self._processing = False
 
+        # ---- 后台线程相关 ----
+        self._log_queue: queue.Queue = queue.Queue()
+        self._worker_thread: Optional[threading.Thread] = None
+        self._worker_result = None
+        self._worker_error: Optional[BaseException] = None
+
         self._build_widgets()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
     # 界面搭建
@@ -65,6 +81,40 @@ class BillingToolApp:
         entry_file.pack(side="left", fill="x", expand=True, padx=(10, 6), pady=10)
         self.browse_input_btn = ttk.Button(frm_file, text="浏览...", command=self.browse_input_file)
         self.browse_input_btn.pack(side="left", padx=(0, 10), pady=10)
+
+        # ---- 运行模式 ----
+        frm_mode = ttk.LabelFrame(self.root, text="运行模式")
+        frm_mode.pack(fill="x", **pad)
+
+        mode_row = ttk.Frame(frm_mode)
+        mode_row.pack(fill="x", padx=10, pady=(8, 2))
+        ttk.Radiobutton(
+            mode_row, text="完整流程（清洗 + 正式处理）", value="full",
+            variable=self.run_mode_var, command=self._on_mode_change,
+        ).pack(side="left")
+        ttk.Radiobutton(
+            mode_row, text="仅清洗（输出清洗后文件，供手动补充数据）", value="clean",
+            variable=self.run_mode_var, command=self._on_mode_change,
+        ).pack(side="left", padx=16)
+
+        mode_row2 = ttk.Frame(frm_mode)
+        mode_row2.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Radiobutton(
+            mode_row2, text="仅正式处理（对已清洗、已手动补充好的文件）", value="formal",
+            variable=self.run_mode_var, command=self._on_mode_change,
+        ).pack(side="left")
+
+        mode_row3 = ttk.Frame(frm_mode)
+        mode_row3.pack(fill="x", padx=10, pady=(0, 8))
+        ttk.Checkbutton(
+            mode_row3, text="自动删除「仅有表头、无数据」的空sheet（汇总/仓租/出库订单除外）",
+            variable=self.remove_empty_var,
+        ).pack(side="left")
+
+        self.save_cleaned_chk = ttk.Checkbutton(
+            mode_row3, text="同时留档清洗后文件", variable=self.save_cleaned_var,
+        )
+        self.save_cleaned_chk.pack(side="left", padx=16)
 
         # ---- 参数设置 ----
         frm_params = ttk.LabelFrame(self.root, text="第二步：填写处理参数")
@@ -86,10 +136,11 @@ class BillingToolApp:
 
         row2b = ttk.Frame(frm_params)
         row2b.pack(fill="x", padx=10, pady=(0, 4))
-        ttk.Checkbutton(
+        self.weekly_chk = ttk.Checkbutton(
             row2b, text="按自然周分别设置燃油费率（点击「一键生成结果」后会弹窗按周填写）",
             variable=self.weekly_mode_var, command=self._on_weekly_mode_toggle,
-        ).pack(side="left", padx=(122, 0))
+        )
+        self.weekly_chk.pack(side="left", padx=(122, 0))
 
         row3 = ttk.Frame(frm_params)
         row3.pack(fill="x", padx=10, pady=(4, 10))
@@ -145,6 +196,45 @@ class BillingToolApp:
         self.log_text = scrolledtext.ScrolledText(frm_log, state="disabled", font=("Consolas", 9), wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
 
+    def _on_mode_change(self):
+        """切换运行模式时，联动调整可用控件、按钮文案与输出文件名。"""
+        mode = self.run_mode_var.get()
+
+        if mode == "clean":
+            # 仅清洗：不需要燃油费率
+            self._set_fuel_widgets_state("disabled")
+            self.save_cleaned_chk.configure(state="disabled")
+            self.start_btn.configure(text="生成清洗后文件")
+            self.status_var.set("仅清洗模式：输出清洗后文件，可手动补充数据后再用「仅正式处理」")
+        elif mode == "formal":
+            # 仅正式处理：不需要订单件数核对（清洗阶段才用）
+            self._set_fuel_widgets_state("normal")
+            self.save_cleaned_chk.configure(state="disabled")
+            self.start_btn.configure(text="生成正式处理结果")
+            self.status_var.set("仅正式处理模式：请选择已清洗（可含手动补充数据）的文件")
+        else:
+            self._set_fuel_widgets_state("normal")
+            self.save_cleaned_chk.configure(state="normal")
+            self.start_btn.configure(text="一键生成结果")
+            self.status_var.set("完整流程：清洗 + 正式处理")
+
+        # 输出文件名后缀随模式变化
+        if self._output_path_auto and self.input_path_var.get():
+            self._set_auto_output_path(self.input_path_var.get())
+
+    def _set_fuel_widgets_state(self, state: str):
+        try:
+            self.fuel_rate_entry.configure(state=state)
+            self.weekly_chk.configure(state=state)
+        except Exception:
+            pass
+
+    def _output_suffix(self) -> str:
+        mode = self.run_mode_var.get()
+        if mode == "clean":
+            return "_已清洗"
+        return "_已处理"
+
     def _on_weekly_mode_toggle(self):
         if self.weekly_mode_var.get():
             self.fuel_rate_hint_var.set("将作为每周默认值；点击「一键生成结果」后可按周分别调整")
@@ -170,7 +260,12 @@ class BillingToolApp:
     def _set_auto_output_path(self, input_path: str):
         folder = os.path.dirname(input_path)
         stem, _ext = os.path.splitext(os.path.basename(input_path))
-        auto_path = os.path.join(folder, f"{stem}_已处理.xlsx")
+        # 避免在已清洗文件上再次处理时出现 "_已清洗_已处理" 这种叠加后缀
+        for suffix in ("_已清洗", "_已处理"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        auto_path = os.path.join(folder, f"{stem}{self._output_suffix()}.xlsx")
         self.output_path_var.set(auto_path)
         self._output_path_auto = True
 
@@ -203,20 +298,61 @@ class BillingToolApp:
             messagebox.showinfo("提示", f"结果文件位于：\n{out_path}")
 
     # ------------------------------------------------------------------
-    # 日志输出（同时刷新界面，避免长时间无响应）
+    # 日志输出（线程安全）
+    #   后台线程 -> 只往队列里放；主线程 -> 定时取出并刷到界面。
+    #   tkinter 不是线程安全的，绝不能在后台线程里直接操作控件。
     # ------------------------------------------------------------------
     def append_log(self, text: str):
+        """供后台线程调用：只入队，不碰界面。"""
+        self._log_queue.put(str(text))
+
+    def _drain_log_queue(self):
+        """主线程调用：把队列里积压的日志一次性刷到界面（批量插入，避免频繁重绘）。"""
+        lines = []
+        try:
+            while True:
+                lines.append(self._log_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        if not lines:
+            return
+
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", str(text) + "\n")
+        self.log_text.insert("end", "\n".join(lines) + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
-        self.root.update_idletasks()
-        self.root.update()
 
     def clear_log(self):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+
+    # ------------------------------------------------------------------
+    # 跨线程交互：后台线程请求主线程弹窗，并阻塞等待用户的选择结果
+    # ------------------------------------------------------------------
+    def _ask_on_main_thread(self, func, *args):
+        """
+        在主线程执行 func(*args) 并把结果返回给调用方（后台线程）。
+        后台线程会阻塞到用户操作完成为止；主线程此时正在 mainloop 中，不会死锁。
+        """
+        box = {"result": None, "error": None}
+        done = threading.Event()
+
+        def runner():
+            try:
+                box["result"] = func(*args)
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+            finally:
+                done.set()
+
+        self.root.after(0, runner)
+        done.wait()
+
+        if box["error"] is not None:
+            raise box["error"]
+        return box["result"]
 
     # ------------------------------------------------------------------
     # 输入校验
@@ -280,11 +416,15 @@ class BillingToolApp:
 
         fuel_rate_raw = self.fuel_rate_var.get().strip()
         weekly_mode = self.weekly_mode_var.get()
+        run_mode = self.run_mode_var.get()
 
         default_rate_for_prefill: Optional[float] = None
         uniform_fuel_rate: Optional[float] = None
 
-        if weekly_mode:
+        if run_mode == "clean":
+            # 仅清洗阶段用不到燃油费率，跳过校验
+            weekly_mode = False
+        elif weekly_mode:
             # 按周模式下，主界面的费率格子是可选的"每周默认值"，用于弹窗预填，允许为空
             if fuel_rate_raw:
                 try:
@@ -321,66 +461,190 @@ class BillingToolApp:
             weekly_mode=weekly_mode,
             default_rate_for_prefill=default_rate_for_prefill,
             expected_count=expected_count,
+            run_mode=run_mode,
         )
 
-    def _run_pipeline(self, input_path, output_path, year, month, fuel_rate, weekly_mode, default_rate_for_prefill, expected_count):
+    def _run_pipeline(self, input_path, output_path, year, month, fuel_rate, weekly_mode,
+                      default_rate_for_prefill, expected_count, run_mode="full"):
         self._processing = True
         self.start_btn.configure(state="disabled")
         self.open_folder_btn.configure(state="disabled")
         self.browse_input_btn.configure(state="disabled")
         self.browse_output_btn.configure(state="disabled")
-        self.status_var.set("处理中，请稍候...")
+        self.status_var.set("处理中，请稍候...（界面可正常操作，处理在后台进行）")
         self.clear_log()
 
+        # 清空上一轮可能残留的日志与结果
+        self._log_queue = queue.Queue()
+        self._worker_result = None
+        self._worker_error = None
+
+        # 弹窗类回调统一包装：后台线程调用 -> 转到主线程弹窗 -> 结果回传
         weekly_rate_callback = None
         if weekly_mode:
             def weekly_rate_callback(week_ranges):
-                return self._weekly_rate_dialog(week_ranges, default_rate_for_prefill)
+                return self._ask_on_main_thread(self._weekly_rate_dialog, week_ranges, default_rate_for_prefill)
 
+        def column_choice_callback(sheet_name, candidates):
+            return self._ask_on_main_thread(self._choose_column_dialog, sheet_name, candidates)
+
+        def order_count_mismatch_callback(actual, expected):
+            return self._ask_on_main_thread(self._confirm_order_count_mismatch, actual, expected)
+
+        kwargs = dict(
+            input_path=input_path,
+            output_path=output_path,
+            year=year,
+            month=month,
+            fuel_rate=fuel_rate,
+            weekly_rate_callback=weekly_rate_callback,
+            column_choice_callback=column_choice_callback,
+            order_count_mismatch_callback=order_count_mismatch_callback,
+            expected_count=expected_count,
+            run_mode=run_mode,
+            # 以下配置项必须在主线程读好再传入：
+            # tkinter 的 Variable 同样不是线程安全的，不能在后台线程调用 .get()
+            remove_empty=self.remove_empty_var.get(),
+            save_cleaned=self.save_cleaned_var.get(),
+            formula_function=self._formula_function_value(),
+            other_sheet_mode=self._other_sheet_mode_value(),
+        )
+
+        self._worker_thread = threading.Thread(target=self._worker, kwargs=kwargs, daemon=True)
+        self._worker_thread.start()
+        self.root.after(100, lambda: self._poll_worker(run_mode))
+
+    def _worker(self, input_path, output_path, year, month, fuel_rate, weekly_rate_callback,
+                column_choice_callback, order_count_mismatch_callback, expected_count, run_mode,
+                remove_empty, save_cleaned, formula_function, other_sheet_mode):
+        """后台线程实际执行处理；只通过队列输出日志，不访问界面控件或 tkinter 变量。"""
         try:
-            result = core.run_full_pipeline(
-                input_path=input_path,
-                year=year,
-                month=month,
-                fuel_rate=fuel_rate,
-                weekly_rate_callback=weekly_rate_callback,
-                output_path=output_path,
-                expected_order_count=expected_count,
-                formula_function=self._formula_function_value(),
-                other_sheet_mode=self._other_sheet_mode_value(),
-                column_choice_callback=self._choose_column_dialog,
-                order_count_mismatch_callback=self._confirm_order_count_mismatch,
-                log=self.append_log,
-            )
-        except core.PipelineCancelled:
-            self.status_var.set("已取消：未完成燃油费率填写")
-            self.append_log("处理已取消：用户未完成按周燃油费率的填写。")
-        except core.OrderCountMismatchError:
-            self.status_var.set("已取消：订单件数核对未通过")
-            self.append_log("处理已取消：订单件数核对未通过，且用户选择不继续。")
-        except core.BillingProcessError as e:
-            self.status_var.set("处理失败")
-            self.append_log(f"[错误] {e}")
-            messagebox.showerror("处理失败", str(e))
-        except Exception as e:  # noqa: BLE001  兜底捕获，避免异常直接崩溃界面
-            self.status_var.set("处理失败")
-            detail = traceback.format_exc()
-            self.append_log(f"[未预期的错误] {e}\n{detail}")
-            messagebox.showerror("处理失败", f"发生未预期的错误：\n{e}\n\n可将日志区域内容复制反馈给开发者排查。")
-        else:
-            self.status_var.set(f"处理完成！共 {len(result['summary_items'])} 项费用已汇总。")
-            self.open_folder_btn.configure(state="normal")
-            messagebox.showinfo(
-                "处理完成",
-                f"账单处理已完成！\n\n结果文件：\n{result['output_path']}\n\n"
-                f"清洗后出库订单：{result['actual_order_count']} 条\n"
-                f"共汇总 {len(result['summary_items'])} 项费用，明细见「汇总」sheet。",
-            )
+            if run_mode == "clean":
+                self._worker_result = core.run_clean_only(
+                    input_path=input_path,
+                    year=year,
+                    month=month,
+                    output_path=output_path,
+                    expected_order_count=expected_count,
+                    remove_empty_sheets=remove_empty,
+                    order_count_mismatch_callback=order_count_mismatch_callback,
+                    log=self.append_log,
+                )
+            elif run_mode == "formal":
+                self._worker_result = core.run_formal_only(
+                    input_path=input_path,
+                    year=year,
+                    month=month,
+                    output_path=output_path,
+                    fuel_rate=fuel_rate,
+                    weekly_rate_callback=weekly_rate_callback,
+                    formula_function=formula_function,
+                    other_sheet_mode=other_sheet_mode,
+                    remove_empty_sheets=remove_empty,
+                    column_choice_callback=column_choice_callback,
+                    log=self.append_log,
+                )
+            else:
+                cleaned_output_path = None
+                if save_cleaned:
+                    stem, _ext = os.path.splitext(output_path)
+                    if stem.endswith("_已处理"):
+                        stem = stem[: -len("_已处理")]
+                    cleaned_output_path = f"{stem}_已清洗.xlsx"
+
+                self._worker_result = core.run_full_pipeline(
+                    input_path=input_path,
+                    year=year,
+                    month=month,
+                    fuel_rate=fuel_rate,
+                    weekly_rate_callback=weekly_rate_callback,
+                    output_path=output_path,
+                    expected_order_count=expected_count,
+                    formula_function=formula_function,
+                    other_sheet_mode=other_sheet_mode,
+                    remove_empty_sheets=remove_empty,
+                    cleaned_output_path=cleaned_output_path,
+                    column_choice_callback=column_choice_callback,
+                    order_count_mismatch_callback=order_count_mismatch_callback,
+                    log=self.append_log,
+                )
+        except BaseException as exc:  # noqa: BLE001  交给主线程统一提示
+            self._worker_error = exc
+
+    def _poll_worker(self, run_mode: str):
+        """主线程定时轮询：刷新日志；后台跑完后统一收尾。"""
+        self._drain_log_queue()
+
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self.root.after(100, lambda: self._poll_worker(run_mode))
+            return
+
+        self._drain_log_queue()  # 收尾再取一次，确保最后几条日志不丢
+        self._finish(run_mode)
+
+    def _finish(self, run_mode: str):
+        err = self._worker_error
+        try:
+            if err is None:
+                self._show_success(self._worker_result, run_mode)
+            elif isinstance(err, core.PipelineCancelled):
+                self.status_var.set("已取消：未完成燃油费率填写")
+                self.append_log("处理已取消：用户未完成按周燃油费率的填写。")
+                self._drain_log_queue()
+            elif isinstance(err, core.OrderCountMismatchError):
+                self.status_var.set("已取消：订单件数核对未通过")
+                self.append_log("处理已取消：订单件数核对未通过，且用户选择不继续。")
+                self._drain_log_queue()
+            elif isinstance(err, core.BillingProcessError):
+                self.status_var.set("处理失败")
+                self.append_log(f"[错误] {err}")
+                self._drain_log_queue()
+                messagebox.showerror("处理失败", str(err))
+            else:
+                self.status_var.set("处理失败")
+                detail = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+                self.append_log(f"[未预期的错误] {err}\n{detail}")
+                self._drain_log_queue()
+                messagebox.showerror("处理失败", f"发生未预期的错误：\n{err}\n\n可将日志区域内容复制反馈给开发者排查。")
         finally:
             self._processing = False
+            self._worker_thread = None
             self.start_btn.configure(state="normal")
             self.browse_input_btn.configure(state="normal")
             self.browse_output_btn.configure(state="normal")
+
+    def _on_close(self):
+        """处理进行中直接关窗会丢失结果，先确认。"""
+        if self._processing:
+            if not messagebox.askyesno("正在处理中", "账单正在处理中，现在关闭会中断处理且不会生成结果。\n\n确定要关闭吗？"):
+                return
+        self.root.destroy()
+
+    def _show_success(self, result, run_mode: str):
+        removed = result.get("removed_empty_sheets") or []
+        removed_text = f"\n已自动删除空sheet（{len(removed)}个）：{'、'.join(removed)}" if removed else ""
+
+        self.open_folder_btn.configure(state="normal")
+
+        if run_mode == "clean":
+            self.status_var.set(f"清洗完成！出库订单 {result['actual_order_count']} 条。")
+            messagebox.showinfo(
+                "清洗完成",
+                f"数据清洗已完成！\n\n清洗后文件：\n{result['output_path']}\n\n"
+                f"清洗后出库订单：{result['actual_order_count']} 条{removed_text}\n\n"
+                f"您可以在该文件中手动补充数据，然后切换到「仅正式处理」模式继续处理。",
+            )
+        else:
+            n = len(result["summary_items"])
+            self.status_var.set(f"处理完成！共 {n} 项费用已汇总。")
+            count_text = ""
+            if result.get("actual_order_count") is not None:
+                count_text = f"清洗后出库订单：{result['actual_order_count']} 条\n"
+            messagebox.showinfo(
+                "处理完成",
+                f"账单处理已完成！\n\n结果文件：\n{result['output_path']}\n\n"
+                f"{count_text}共汇总 {n} 项费用，明细见「汇总」sheet。{removed_text}",
+            )
 
     # ------------------------------------------------------------------
     # 交互回调：订单件数核对不一致 / 未知sheet多候选列选择
