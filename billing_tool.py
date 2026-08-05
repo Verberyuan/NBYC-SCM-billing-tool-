@@ -22,9 +22,19 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 import billing_core as core
 
+def resource_path(relative_path: str) -> str:
+    """获取开发环境或 PyInstaller 打包后的资源路径。"""
+    if getattr(sys, "frozen", False):
+        base_path = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(base_path, relative_path)
+
+
 
 APP_TITLE = "账单处理工具"
-APP_VERSION = "v1.0"
+APP_VERSION = "v3.0.0"
 
 
 class BillingToolApp:
@@ -764,14 +774,12 @@ class BillingToolApp:
 
 def main():
     root = tk.Tk()
+
     try:
-        style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        elif "clam" in style.theme_names():
-            style.theme_use("clam")
+        root.iconbitmap(resource_path("billing_tool.ico"))
     except Exception:
         pass
+
 
     app = BillingToolApp(root)
     root.mainloop()

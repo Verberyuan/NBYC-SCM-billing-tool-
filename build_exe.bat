@@ -1,48 +1,84 @@
 @echo off
-echo ============================================
-echo   Billing Tool - Build EXE
-echo ============================================
+chcp 65001 >nul
+cd /d "%~dp0"
+
+echo ========================================
+echo 当前目录：
+cd
+echo ========================================
 echo.
 
-where python >nul 2>nul
+echo 正在检查 Python...
+python --version
+
 if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.9+ first.
-    echo Make sure to check "Add python.exe to PATH" during installation.
-    echo Download: https://www.python.org/downloads/
     echo.
+    echo 未找到 Python。
+    echo 请确认 Python 已安装并加入 PATH。
     pause
     exit /b 1
 )
 
-echo Installing/updating required packages, this may take a few minutes...
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+echo.
+echo 正在检查 PyInstaller...
+python -m PyInstaller --version
+
 if errorlevel 1 (
-    echo [ERROR] Failed to install dependencies. Check your network connection and retry.
+    echo.
+    echo 未找到 PyInstaller，正在安装...
+    python -m pip install pyinstaller
+
+    if errorlevel 1 (
+        echo.
+        echo PyInstaller 安装失败。
+        pause
+        exit /b 1
+    )
+)
+
+echo.
+echo 正在检查必要文件...
+
+if not exist "BillingTool.spec" (
+    echo 找不到 BillingTool.spec
+    pause
+    exit /b 1
+)
+
+if not exist "billing_tool.py" (
+    echo 找不到 billing_tool.py
+    pause
+    exit /b 1
+)
+
+if not exist "billing_tool.ico" (
+    echo 找不到 billing_tool.ico
     pause
     exit /b 1
 )
 
 echo.
-echo Building exe, please wait (usually 1-2 minutes)...
-python -m PyInstaller --onefile --noconsole --name "BillingTool" --clean billing_tool.py
+echo 正在清理旧文件...
+
+if exist "build" rmdir /s /q "build"
+if exist "dist" rmdir /s /q "dist"
+
+echo.
+echo 正在打包，请稍候...
+python -m PyInstaller --noconfirm --clean "BillingTool.spec"
+
 if errorlevel 1 (
-    echo [ERROR] Build failed. Please check the log above.
+    echo.
+    echo ========================================
+    echo 打包失败，请查看上方错误信息。
+    echo ========================================
     pause
     exit /b 1
 )
 
 echo.
-if exist "dist\BillingTool.exe" (
-    copy /Y "dist\BillingTool.exe" "BillingTool.exe" >nul
-    echo ============================================
-    echo Build succeeded!
-    echo exe file created at: %cd%\BillingTool.exe
-    echo You can double-click it directly, or copy it anywhere you like.
-    echo ============================================
-) else (
-    echo Could not find the generated exe file. Please check the log above.
-)
-
-echo.
+echo ========================================
+echo 打包完成。
+echo 请查看 dist 文件夹。
+echo ========================================
 pause

@@ -5,7 +5,7 @@ a = Analysis(
     ['billing_tool.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('billing_tool.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='billing_tool.ico',
 )
