@@ -1,0 +1,51 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller temporary and output folders
+build/
+dist/
+
+# Executable files should be uploaded to Releases
+*.exe
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+~$*
+
+# IDE files
+.vscode/
+.idea/
+
+# Windows files
+Thumbs.db
+desktop.ini
+
+# Environment and secret files
+.env
+.env.*
+
+# Customer billing data
+*.xlsx
+*.XLSX
+*.xls
+*.XLS
+
+# Allow public sample files
+!fuel_rates_sample.xlsx
+!fuel_rates_sample.XLSX
+!fuel_rates_sample.xls
+!fuel_rates_sample.XLS
+!fuel_rates_sample.csv
+
+# Generated archives
+*.zip

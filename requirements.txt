@@ -2,3 +2,5 @@ pandas>=2.0
 openpyxl>=3.1
 python-dateutil>=2.8
 pyinstaller>=6.0
+# 可选：拖拽文件到界面。不装也能正常使用（改用「浏览/添加」按钮）
+tkinterdnd2>=0.4.0

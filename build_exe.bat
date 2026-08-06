@@ -1,76 +1,102 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
 
+rem Keep this BAT file ASCII-only to avoid mojibake on Chinese Windows.
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+set "PIP_DISABLE_PIP_VERSION_CHECK=1"
+
 echo ========================================
-echo 当前目录：
+echo BillingTool build script
+echo Working directory:
 cd
 echo ========================================
 echo.
 
-echo 正在检查 Python...
-python --version
+where py >nul 2>nul
+if not errorlevel 1 (
+    set "PY=py -3"
+) else (
+    set "PY=python"
+)
 
+echo Checking Python...
+%PY% --version
 if errorlevel 1 (
     echo.
-    echo 未找到 Python。
-    echo 请确认 Python 已安装并加入 PATH。
+    echo Python was not found.
+    echo Install 64-bit Python 3.11 or 3.12 and enable Add Python to PATH.
     pause
     exit /b 1
 )
 
 echo.
-echo 正在检查 PyInstaller...
-python -m PyInstaller --version
+if not exist ".venv\Scripts\python.exe" (
+    echo Creating virtual environment .venv ...
+    %PY% -m venv .venv
+    if errorlevel 1 (
+        echo Failed to create virtual environment.
+        pause
+        exit /b 1
+    )
+)
 
+call ".venv\Scripts\activate.bat"
+if errorlevel 1 (
+    echo Failed to activate virtual environment.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Installing or updating dependencies...
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 if errorlevel 1 (
     echo.
-    echo 未找到 PyInstaller，正在安装...
-    python -m pip install pyinstaller
+    echo Dependency installation failed.
+    echo Check your network, proxy, and access to pypi.org.
+    pause
+    exit /b 1
+)
 
-    if errorlevel 1 (
-        echo.
-        echo PyInstaller 安装失败。
+echo.
+echo Checking required source files...
+for %%F in (BillingTool_portable.spec billing_tool.py billing_core.py customer_config.py fuel_rates.py sheet_merge.py money.py rate_store.py test_regression.py requirements.txt) do (
+    if not exist "%%F" (
+        echo Missing file: %%F
         pause
         exit /b 1
     )
 )
 
 echo.
-echo 正在检查必要文件...
-
-if not exist "BillingTool.spec" (
-    echo 找不到 BillingTool.spec
-    pause
-    exit /b 1
-)
-
-if not exist "billing_tool.py" (
-    echo 找不到 billing_tool.py
-    pause
-    exit /b 1
-)
-
-if not exist "billing_tool.ico" (
-    echo 找不到 billing_tool.ico
+echo Running regression tests...
+python test_regression.py
+if errorlevel 1 (
+    echo.
+    echo ========================================
+    echo Regression tests failed. Packaging stopped.
+    echo Review the output above.
+    echo ========================================
     pause
     exit /b 1
 )
 
 echo.
-echo 正在清理旧文件...
-
+echo Cleaning old build folders...
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 
 echo.
-echo 正在打包，请稍候...
-python -m PyInstaller --noconfirm --clean "BillingTool.spec"
-
+echo Packaging BillingTool.exe ...
+python -m PyInstaller --noconfirm --clean "BillingTool_portable.spec"
 if errorlevel 1 (
     echo.
     echo ========================================
-    echo 打包失败，请查看上方错误信息。
+    echo Packaging failed. Review the output above.
     echo ========================================
     pause
     exit /b 1
@@ -78,7 +104,8 @@ if errorlevel 1 (
 
 echo.
 echo ========================================
-echo 打包完成。
-echo 请查看 dist 文件夹。
+echo Build completed successfully.
+echo Output: dist\BillingTool.exe
 echo ========================================
 pause
+endlocal

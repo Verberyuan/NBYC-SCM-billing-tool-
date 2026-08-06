@@ -1,0 +1,6 @@
+carrier,service_group,start,end,rate,timezone
+FedEx,Ground,2026-06-29,2026-07-05,0.2525,Asia/Shanghai
+FedEx,Ground,2026-07-06,2026-07-12,0.2500,Asia/Shanghai
+FedEx,Ground,2026-07-13,2026-07-19,0.2500,Asia/Shanghai
+FedEx,Ground,2026-07-20,2026-07-26,0.2525,Asia/Shanghai
+FedEx,Ground,2026-07-27,2026-08-02,0.2575,Asia/Shanghai
